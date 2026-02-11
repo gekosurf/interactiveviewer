@@ -24,9 +24,11 @@ class ChessPiece {
   ChessPiece({required this.id, required this.position, required this.type});
 }
 
-class _MapStackViewState extends State<MapStackView> {
+class _MapStackViewState extends State<MapStackView> with SingleTickerProviderStateMixin {
   final List<ChessPiece> _pieces = [];
   final TransformationController _transformController = TransformationController();
+  late AnimationController _tiltController;
+  late Animation<double> _tiltAnimation;
 
   bool _is3D = false;
   ChessPiece? _draggingPiece;
@@ -40,14 +42,35 @@ class _MapStackViewState extends State<MapStackView> {
   @override
   void initState() {
     super.initState();
-    _updateTransformation();
+    _tiltController = AnimationController(duration: const Duration(milliseconds: 1500), vsync: this);
+    _tiltAnimation = CurvedAnimation(parent: _tiltController, curve: Curves.easeInOutCubic)
+      ..addListener(() {
+        _updateTransformation(_tiltAnimation.value);
+        setState(() {});
+      });
+    _updateTransformation(0.0);
   }
 
-  void _updateTransformation() {
+  @override
+  void dispose() {
+    _tiltController.dispose();
+    _transformController.dispose();
+    super.dispose();
+  }
+
+  void _updateTransformation(double t) {
     final Matrix4 matrix = Matrix4.identity();
-    if (_is3D) {
-      matrix.setEntry(3, 2, 0.001);
-      matrix.rotateX(-1.1);
+    if (t > 0) {
+      // Create a centered perspective transformation
+      final double center = boardSize / 2;
+      matrix.translate(center, center);
+
+      final Matrix4 perspective = Matrix4.identity()
+        ..setEntry(3, 2, 0.001 * t) // Perspective grows with t
+        ..rotateX(-1.1 * t); // Rotation grows with t
+      matrix.multiply(perspective);
+
+      matrix.translate(-center, -center);
     }
     _transformController.value = matrix;
   }
@@ -167,10 +190,16 @@ class _MapStackViewState extends State<MapStackView> {
       ),
       backgroundColor: Colors.grey[900],
       floatingActionButton: FloatingActionButton(
-        onPressed: () => setState(() {
-          _is3D = !_is3D;
-          _updateTransformation();
-        }),
+        onPressed: () {
+          setState(() {
+            _is3D = !_is3D;
+            if (_is3D) {
+              _tiltController.forward();
+            } else {
+              _tiltController.reverse();
+            }
+          });
+        },
         child: Icon(_is3D ? Icons.map : Icons.view_in_ar),
       ),
       body: Center(
@@ -219,31 +248,50 @@ class _MapStackViewState extends State<MapStackView> {
             final offset = piece.position;
             final assetPath = piece.type == PieceType.knight ? 'assets/knight.png' : 'assets/queen.png';
             const double size = 80;
-            const double verticalOffset = 40.0;
 
             final isDragging = _draggingPiece?.id == piece.id;
+            final t = _tiltAnimation.value;
+
+            // Visual corrections interpolated
+            final double correctionX = -10.0 * t;
+            final double correctionY = 15.0 * t;
+
+            final double leftPos = offset.dx - (size / 2) + correctionX;
+
+            // Interpolate topPos between centered (2D) and baseline-aligned (3D)
+            final double centeredTop = offset.dy - (size / 2);
+            final double baselineTop = offset.dy - (isDragging ? size + 20 : size) + correctionY;
+            final double topPos = centeredTop + (baselineTop - centeredTop) * t;
 
             return Positioned(
-              left: offset.dx - (size / 2),
-              top: offset.dy - (isDragging ? verticalOffset + 10 : verticalOffset) - size,
+              left: leftPos,
+              top: topPos,
               child: Stack(
                 clipBehavior: Clip.none,
-                alignment: Alignment.bottomCenter,
+                alignment: Alignment.lerp(Alignment.center, Alignment.bottomCenter, t)!,
                 children: [
-                  // Shadow (Stays at the bottom, non-interactive background)
+                  // Shadow
                   if (!isDragging)
-                    Positioned(
-                      bottom: size * 0.05,
-                      child: Container(
-                        width: size * 0.6,
-                        height: size * 0.2,
-                        decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.3), shape: BoxShape.circle),
+                    Transform.translate(
+                      // Interpolate shadow position from offset to base
+                      offset: Offset(0, (size / 2.5) * (1 - t)),
+                      child: Opacity(
+                        opacity: 0.3 + (0.2 * t), // Slightly stronger shadow in 3D
+                        child: Container(
+                          width: size * (1.0 + 0.2 * t),
+                          height: size * (0.3 + 0.1 * t),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.3),
+                            shape: BoxShape.circle,
+                            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.2), blurRadius: 10 * t, spreadRadius: 2 * t)],
+                          ),
+                        ),
                       ),
                     ),
-                  // Piece (Stands up from the bottom, interactive part)
+                  // Piece
                   Transform(
                     alignment: Alignment.bottomCenter,
-                    transform: Matrix4.identity()..rotateX(_is3D ? 1.1 : 0),
+                    transform: Matrix4.identity()..rotateX(1.1 * t),
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onPanStart: (details) => _handlePieceDragStart(piece, details),
@@ -251,9 +299,9 @@ class _MapStackViewState extends State<MapStackView> {
                       onPanEnd: _handlePieceDragEnd,
                       child: Container(
                         width: size,
-                        height: size * 2, // Doubled height to cover the "standing" piece in 3D
+                        height: size,
                         alignment: Alignment.bottomCenter,
-                        color: Colors.transparent, // Ensures the entire taller area is hit-sensitive
+                        color: Colors.transparent,
                         child: Opacity(
                           opacity: isDragging ? 0.7 : 1.0,
                           child: Material(
